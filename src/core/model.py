@@ -64,17 +64,37 @@ class RandomForestManager:
         ### [FINE MODIFICA AWS] ###
 
         # [MODIFICA ZERO-COPY] Cache key basata sull'offset, non solo sul path
-        cache_key = f"{full_path}_{skip_rows}_{num_rows}"
-
         if cache_key in self.dataset_cache:
             X, y = self.dataset_cache[cache_key]
         else:
-            print(f" -> [Worker] Lettura Zero-Copy S3: Saltando {skip_rows} righe, leggendo {num_rows} righe...")
+            # --- MODIFICA ZERO-COPY VELOCE (DOWNLOAD LOCALE + PARSING) ---
+            print(f" -> [Worker] Download rapido S3 -> Disco locale...")
             
-            # [MODIFICA ZERO-COPY] Salto delle righe intelligente mantenendo l'header
+            # Estraiamo la chiave corretta per Boto3 usando urlparse
+            parsed_url = urlparse(full_path)
+            s3_key = parsed_url.path.lstrip('/')
+            
+            # Creiamo un file temporaneo locale univoco per questo worker
+            local_temp_csv = f"/tmp/temp_dataset_{subforest_id}.csv"
+            
+            start_dl = time.time()
+            s3_client = boto3.client('s3')
+            # Questo download è multi-thread e sfrutta tutta la banda EC2!
+            s3_client.download_file(target_bucket, s3_key, local_temp_csv)
+            print(f"    [OK] Download 100% completato in {time.time() - start_dl:.1f}s")
+            
+            print(f" -> [Worker] Lettura da disco NVMe locale: Salto {skip_rows} righe, leggo {num_rows} righe...")
+            start_parse = time.time()
+            
             rows_to_skip = 0 if skip_rows == 0 else range(1, skip_rows + 1)
             
-            df = pd.read_csv(full_path, engine='c', dtype=np.float32, skiprows=rows_to_skip, nrows=num_rows)
+            # Ora Pandas legge dal disco locale: è incredibilmente più veloce!
+            df = pd.read_csv(local_temp_csv, engine='c', dtype=np.float32, skiprows=rows_to_skip, nrows=num_rows)
+            print(f" [OK] Parsing CSV locale completato in {time.time() - start_parse:.1f}s")
+            
+            # Pulizia immediata del disco per risparmiare spazio
+            os.remove(local_temp_csv)
+            # -------------------------------------------------------------
             
             target_col = 'Label' if 'Label' in df.columns else df.columns[-1]
 
