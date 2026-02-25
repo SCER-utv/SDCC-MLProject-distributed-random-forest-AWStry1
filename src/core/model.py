@@ -61,8 +61,10 @@ class RandomForestManager:
         except ValueError as e:
             print(f"!!! [ERRORE S3]: {e}")
             return 0
-        ### [FINE MODIFICA AWS] ###
+        # [FINE MODIFICA AWS] ###
 
+        cache_key = f"{full_path}_{skip_rows}_{num_rows}"        
+        
         # [MODIFICA ZERO-COPY] Cache key basata sull'offset, non solo sul path
         if cache_key in self.dataset_cache:
             X, y = self.dataset_cache[cache_key]
