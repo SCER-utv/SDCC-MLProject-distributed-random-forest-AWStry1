@@ -1,0 +1,293 @@
+import os
+import sys
+import argparse  # [MODIFICA 1] Import per parametri da terminale
+import csv       # [MODIFICA 2] Import per salvare le metriche
+from concurrent.futures import ThreadPoolExecutor
+import time
+import gc
+import json
+import pandas as pd
+import numpy as np # [MODIFICA] Serve per gestire il float32
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.core.factories.higgs_task_factory import HiggsTaskFactory
+from src.network.grpc_master import GrpcMaster
+from src.core.factories.ids_task_factory import IDSTaskFactory
+from src.core.factories.taxi_task_factory import TaxiTaskFactory
+import io
+from src.utils.config import load_config
+import botocore 
+import boto3
+import warnings
+from datetime import datetime
+
+def save_metrics(dataset, n_workers, n_trees, strategy_name, train_time, inf_time, metrics_dict, config):
+    s3_client = boto3.client('s3')
+    target_bucket = config.get("s3_bucket", "distributed-random-forest-bkt")
+    
+    # [MODIFICA S3] Creazione percorso dinamico: es. "results/higgs/higgs_results.csv"
+    s3_key = f"results/{dataset}/{dataset}_results.csv"
+    
+    new_row_df = pd.DataFrame([{
+        'Dataset': dataset, 
+        'Workers': n_workers, 
+        'Trees': n_trees, 
+        'Strategy': strategy_name, 
+        'Train_Time': round(train_time, 2), 
+        'Infer_Time': round(inf_time, 2), 
+        'Metrics': str(metrics_dict)
+    }])
+
+    try:
+        # Tenta di scaricare il CSV esistente da S3
+        obj = s3_client.get_object(Bucket=target_bucket, Key=s3_key)
+        df_existing = pd.read_csv(io.BytesIO(obj['Body'].read()))
+        # Se esiste, accoda la nuova riga (APPEND continuo)
+        df_final = pd.concat([df_existing, new_row_df], ignore_index=True)
+        
+    except botocore.exceptions.ClientError as e:
+        # Se il file non esiste (errore 404 NoSuchKey), crea il dataframe partendo dalla nuova riga
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            df_final = new_row_df
+        else:
+            print(f"!! Errore imprevisto di S3 durante il salvataggio: {e}")
+            return
+            
+    # Salva il file aggiornato su S3 (sovrascrivendo la vecchia versione con quella accodata)
+    csv_buffer = io.StringIO()
+    df_final.to_csv(csv_buffer, index=False)
+    s3_client.put_object(Bucket=target_bucket, Key=s3_key, Body=csv_buffer.getvalue())
+    print(f">> Risultati accodati permanentemente in: s3://{target_bucket}/{s3_key}")
+
+# Aggiungiamo model_id come parametro
+def update_model_registry(model_id, dataset, n_workers, n_trees, metrics_dict, config):
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1') 
+    table = dynamodb.Table('ModelRegistry')
+
+    # [FIX] Rigeneriamo il timestamp per popolare il campo su DynamoDB
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    try:
+        table.put_item(
+            Item={
+                'ModelID': model_id,               # La chiave primaria obbligatoria
+                'Dataset': dataset,
+                'Status': 'READY_FOR_INFERENCE',
+                'WorkersUsed': n_workers,
+                'TotalTrees': n_trees,
+                'Metrics': str(metrics_dict),
+                'Timestamp': timestamp
+            }
+        )
+        print(f">> Stato Condiviso: Modello '{model_id}' registrato con successo su DynamoDB!")
+    except Exception as e:
+        print(f"!! Errore durante l'aggiornamento di DynamoDB: {e}")   
+
+
+
+def process_training_job(dataset, workers_list, trees, strategy_file='config/worker_strategies.json'):
+    print(f"\n{'='*50}\n INIZIO ELABORAZIONE JOB: {dataset.upper()} | {trees} Alberi | {len(workers_list)} Workers\n{'='*50}")
+
+    num_active_workers = len(workers_list)
+
+    # [MODIFICA] BATCH SIZE DINAMICO (HARDCODED, DA MODIFICARE!)
+    if dataset == 'taxi':
+        BATCH_SIZE = 50000 
+    elif dataset == 'higgs':
+        BATCH_SIZE = 35000 
+    else:
+        BATCH_SIZE = 20000 
+
+    config = load_config()
+
+    try:
+        # [MODIFICA LETTURA JSON BIFORCATA, HARDCODED, DA MODIFICARE!)
+        task_category = "regression" if dataset == 'taxi' else "classification"
+        with open(strategy_file, 'r') as f:
+            full_strategy_map = json.load(f)
+
+        str_num = str(num_active_workers)
+        if str_num in full_strategy_map[task_category]:
+            config['worker_strategies'] = full_strategy_map[task_category][str_num]
+            print(f">> Caricato set di {num_active_workers} strategie ({task_category}).")
+        else:
+            print(f"!! ERRORE: Nessuna config specifica per {num_active_workers} worker in {task_category}.")
+            sys.exit(1)
+            
+    except Exception as e:
+        print(f"!! ERRORE NELLA LETTURA DEL JSON: {e}")
+        sys.exit(1)
+
+    # [MODIFICA 5] INIEZIONE DEI PARAMETRI DINAMICI NELLA CONFIG IN RAM
+    config['num_workers'] = num_active_workers
+    config['workers'] = workers_list
+    config['total_trees'] = trees
+    # --- NUOVO: Generiamo il Model ID univoco QUI e lo diamo ai Worker! ---
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    unique_model_id = f"rf_{dataset}_{timestamp}"
+    config['model_id'] = unique_model_id
+    # ---------------------------------------------------------------------
+
+    # Selezione Factory
+    if dataset == 'taxi': factory = TaxiTaskFactory()
+    elif dataset == 'higgs': factory = HiggsTaskFactory()
+    else: factory = IDSTaskFactory()
+
+    strategy = factory.create_strategy()
+    data_manager = factory.create_data_manager(strategy)
+
+    # Aggiorniamo il bit di task nel config per i messaggi gRPC
+    config['task'] = strategy.get_task_type()
+
+    # --- MODIFICA ZERO-COPY: LETTURA DAI PERCORSI S3 NEL JSON ---
+    target_bucket = config.get("s3_bucket", "distributed-random-forest-bkt")
+    dataset_paths = config['paths'][dataset]
+
+    train_s3_key = dataset_paths['train']
+    test_s3_key = dataset_paths['test']
+    
+    train_s3_uri = f"s3://{target_bucket}/{train_s3_key}"
+    test_s3_uri = f"s3://{target_bucket}/{test_s3_key}"
+
+    print(f">> Lettura Zero-Copy attivata.")
+    print(f"   - Sorgente Train: {train_s3_uri}")
+    print(f"   - Sorgente Test:  {test_s3_uri}")
+
+    # 2. Setup Master (Iniettiamo la strategia nel costruttore)
+    grpc_master = GrpcMaster(config, strategy)
+    grpc_master.connect()
+
+    # 3. Training Distribuito
+    # Ora master.train() distribuirà subforest_id e base_seed a ogni worker
+    print("\n--- Avvio Training Distribuito ---")
+    start_train = time.time()
+
+    grpc_master.train(train_s3_uri, train_s3_key, target_bucket)
+    train_duration = time.time() - start_train
+    print(f"Training completato in: {train_duration:.2f}s")
+
+    # 4. Inferenza (Testing)
+    # Otteniamo il nome del target dinamicamente dal data_manager specifico
+    target_col = data_manager.get_target_column()
+
+    print(f"Caricamento Test Set da S3: {test_s3_uri}...")
+    
+    test_df = pd.read_csv(test_s3_uri, dtype=np.float32)
+
+    if config['task'] != 1: # Se è classificazione, la label è int
+        test_df[target_col] = test_df[target_col].astype(np.int8)
+
+    X_test = test_df.drop(target_col, axis=1).values.astype(np.float32) 
+    y_true = test_df[target_col].values
+    total_samples = len(X_test)
+
+    # [MODIFICA 3: CHUNKING EFFICIENTE]
+    # Creiamo i chunk affettando numpy (veloce) e convertendo in lista solo il pezzettino che serve
+    # Questo mantiene l'uso della RAM basso.
+    chunks = []
+    for i in range(0, total_samples, BATCH_SIZE):
+        chunk_np = X_test[i : i + BATCH_SIZE]
+        chunks.append(chunk_np.tolist()) # Convertiamo solo il pacchetto da inviare
+
+    print(f"\n--- Inferenza su {total_samples} campioni ---")
+    print(f"Batch Size: {BATCH_SIZE} | Chunk Totali: {len(chunks)}")
+
+    start_predict = time.time()
+    results = []
+    processed_count = 0
+
+    # Parallelizzazione invio chunk
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        # predict_batch userà strategy.aggregate per media o moda
+        for batch_res in ex.map(grpc_master.predict_batch, chunks):
+            results.extend(batch_res)
+
+            processed_count += len(batch_res)
+            if processed_count % 100000 == 0:
+                perc = (processed_count / total_samples) * 100
+                print(f"[{time.strftime('%H:%M:%S')}] Progresso: {processed_count}/{total_samples} ({perc:.1f}%)")
+
+    duration = time.time() - start_predict
+    grpc_master.close()
+
+    valid_preds = [p for p in results if p is not None]
+
+    # [MODIFICA] Allineamento y_true con i risultati validi
+    # (Attenzione: se results ha dei None, y_true deve essere filtrato allo stesso modo)
+    if len(valid_preds) < len(y_true):
+         # Ricostruiamo valid_true solo se ci sono stati fallimenti
+         valid_true = []
+         for i, res in enumerate(results):
+             if res is not None:
+                 valid_true.append(y_true[i])
+    else:
+         valid_true = y_true 
+         
+    print(f"\n--- REPORT FINALE ---")
+    print(f"Campioni Totali: {total_samples}")
+    print(f"Predizioni Ricevute: {len(valid_preds)}")
+    print(f"Tempo Inferenza: {duration:.4f}s")
+
+    if duration > 0:
+        print(f"Throughput: {len(valid_preds) / duration:.0f} pred/sec")
+
+    if len(valid_preds) > 0:
+        # [MODIFICA IMPORTANTE QUI]
+        # 1. Assegniamo il risultato di report() a una variabile 'metrics'
+        metrics = strategy.report(valid_true, valid_preds)
+        
+        # 2. Salviamo tutto nel CSV per i grafici!
+        # (Presuppone che train_duration sia stato calcolato prima)
+        save_metrics(dataset, config['num_workers'], trees, "JSON_Strategy", train_duration, duration, metrics, config)
+        print(">> Risultati salvati in experiment_results.csv per l'analisi!")
+
+        # 3. [NUOVO] Registriamo il modello nel Database per lo Stato Condiviso
+        update_model_registry(config['model_id'], dataset, config['num_workers'], trees, metrics, config)
+    else:
+        print("Errore: Nessuna predizione ricevuta dai Worker.")
+
+
+# DEMONE SQS (In ascolto sulla coda FIFO)
+if __name__ == '__main__':
+    
+    # HARDCODED, DA MODIFICARE!
+    QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/248593862537/JobRequestQueue.fifo"
+    
+    sqs = boto3.client('sqs', region_name='us-east-1')
+    
+    print(" Master avviato e in attesa di Job sulla coda SQS...")
+    
+    while True:
+        try:
+            # Polling lungo: il Master aspetta fino a 20 secondi l'arrivo di un messaggio
+            response = sqs.receive_message(
+                QueueUrl=QUEUE_URL,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=20  
+            )
+            
+            if 'Messages' in response:
+                message = response['Messages'][0]
+                receipt_handle = message['ReceiptHandle']
+                
+                # Leggiamo il "bigliettino" inviato dal Client
+                job_data = json.loads(message['Body'])
+                dataset = job_data['dataset']
+                workers = job_data['workers']
+                trees = job_data['trees']
+                
+                # Chiamiamo il motore di training
+                process_training_job(dataset, workers, trees)
+                
+                # Se il training è andato a buon fine, cancelliamo il messaggio dalla coda
+                sqs.delete_message(
+                    QueueUrl=QUEUE_URL,
+                    ReceiptHandle=receipt_handle
+                )
+                print(" Job completato e rimosso dalla coda SQS. Torno in ascolto...\n")
+                
+        except KeyboardInterrupt:
+            print("\n Master arrestato manualmente (Ctrl+C). Uscita dal ciclo SQS.")
+            sys.exit(0)
+        except Exception as e:
+            print(f" Errore imprevisto nel ciclo SQS: {e}")
+            time.sleep(5)
