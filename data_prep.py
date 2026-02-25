@@ -28,8 +28,8 @@ def prepare_zero_copy_dataset(name, is_regression):
     input_s3_uri = sources[name]
     
     # 2. Definiamo i path di DESTINAZIONE (allineati al tuo nuovo config.json!)
-    train_s3_key = f"data/3_processed/{name}/{name}_train.csv"
-    test_s3_key = f"data/3_processed/{name}/{name}_test.csv"
+    train_s3_key = f"data/processed/{name}/{name}_train.csv"
+    test_s3_key = f"data/processed/{name}/{name}_test.csv"
     
     print(f"\n[{name.upper()}] Inizio preparazione DataPrep per Zero-Copy...")
     print(f" -> Sorgente S3: {input_s3_uri}")
