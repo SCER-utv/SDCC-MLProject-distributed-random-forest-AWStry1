@@ -20,9 +20,9 @@ def prepare_zero_copy_dataset(name, is_regression):
     # 1. Definiamo i path SORGENTE (dove si trovano i dataset unici ottimizzati)
     # [NOTA]: Ho inserito i percorsi in cui tenevi i file "optimized". Se li hai spostati, modificali qui!
     sources = {
-        "higgs": f"s3://{S3_BUCKET}/data/higgs/processed/higgs_optimized.csv",
-        "taxi": f"s3://{S3_BUCKET}/data/taxi/processed/taxi_optimized.csv",
-        "ids": f"s3://{S3_BUCKET}/data/ids/processed/ids_optimized.csv"
+        "higgs": f"s3://{S3_BUCKET}/data/interim/higgs_optimized.csv",
+        "taxi":  f"s3://{S3_BUCKET}/data/interim/taxi_optimized.csv",
+        "ids":   f"s3://{S3_BUCKET}/data/interim/ids_optimized.csv"
     }
     
     input_s3_uri = sources[name]
