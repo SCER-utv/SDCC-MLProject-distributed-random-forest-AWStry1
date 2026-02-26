@@ -152,9 +152,6 @@ def process_training_job(dataset, workers_list, trees, strategy_file='config/wor
     print(f"   - Sorgente Train: {train_s3_uri}")
     print(f"   - Sorgente Test:  {test_s3_uri}")
 
-    print("napoli")
-    print("bari")
-
     # 2. Setup Master (Iniettiamo la strategia nel costruttore)
     grpc_master = GrpcMaster(config, strategy)
     grpc_master.connect()
