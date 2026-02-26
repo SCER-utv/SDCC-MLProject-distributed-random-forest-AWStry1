@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  master:
+    build: .
+    container_name: rf_master
+    volumes:
+      - .:/app
+    environment:
+      - AWS_S3_BUCKET=distributed-random-forest-bkt
+    command: python src/master.py
+
+  worker:
+    build: .
+    volumes:
+      - .:/app
+    environment:
+      - AWS_S3_BUCKET=distributed-random-forest-bkt
+    ports:
+      - "50051:50051"
+    command: python src/worker.py 50051
+
+  inference_server:
+    build: .
+    container_name: rf_inference
+    volumes:
+      - .:/app
+    environment:
+      - AWS_S3_BUCKET=distributed-random-forest-bkt
+    ports:
+      - "8080:8080"
+    command: python src/inference_server.py --model_id rf_higgs_20260224_155127 --dataset higgs
+
+  client:
+    build: .
+    volumes:
+      - .:/app
+    environment:
+      - AWS_S3_BUCKET=distributed-random-forest-bkt
