@@ -86,6 +86,17 @@ class GrpcMaster:
                             ec2_client.reboot_instances(InstanceIds=[instance_id])
                             print(f" [AUTO-HEALING] -> Pausa di 45s per far spegnere e riaccendere la macchina...")
                             time.sleep(45)
+
+                        # --- NUOVO BLOCCO AGGIUNTO ---
+                        elif instance_state == 'stopping':
+                            print(f" [AUTO-HEALING] -> L'istanza si sta spegnendo. Attendo che sia completamente ferma...")
+                            ec2_client.get_waiter('instance_stopped').wait(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] -> Ora è 'stopped'. Inviato comando 'START_INSTANCES'...")
+                            ec2_client.start_instances(InstanceIds=[instance_id])
+                            ec2_client.get_waiter('instance_running').wait(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] -> Hardware ACCESO! Pausa di 30s per il boot...")
+                            time.sleep(30)
+                        # -----------------------------
                         
                         # Polling ESTREMO sulla vecchia macchina
                         if _wait_for_port(old_ip, max_attempts=60):
