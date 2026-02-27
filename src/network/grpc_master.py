@@ -85,13 +85,15 @@ class GrpcMaster:
                             ec2_client.start_instances(InstanceIds=[instance_id])
                             print(f" [AUTO-HEALING] Attesa boot EC2 {instance_id}...")
                             ec2_client.get_waiter('instance_running').wait(InstanceIds=[instance_id])
+                            time.sleep(30)
                             
                         elif instance_state in ['running', 'pending']:
                             print(f" [AUTO-HEALING] L'istanza è ACCESA ma bloccata. Tento il Riavvio (Reboot)...")
                             ec2_client.reboot_instances(InstanceIds=[instance_id])
+                            time.sleep(45)
                         
                         # FACCIAMO IL POLLING SULLA VECCHIA MACCHINA RIAVVIATA
-                        if _wait_for_port(old_ip):
+                        if _wait_for_port(old_ip, max_attempts=50):
                             reboot_successful = True
                             final_ip = old_ip
                         else:
