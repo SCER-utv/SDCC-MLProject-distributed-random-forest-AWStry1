@@ -4,6 +4,7 @@ services:
   master:
     build: .
     container_name: rf_master
+    restart: unless-stopped
     volumes:
       - .:/app
     environment:
@@ -12,6 +13,8 @@ services:
 
   worker:
     build: .
+    container_name: rf_worker
+    restart: unless-stopped
     volumes:
       - .:/app
     environment:
@@ -23,6 +26,7 @@ services:
   inference_server:
     build: .
     container_name: rf_inference
+    restart: unless-stopped
     volumes:
       - .:/app
     environment:
