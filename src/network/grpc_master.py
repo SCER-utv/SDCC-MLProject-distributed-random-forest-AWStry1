@@ -170,7 +170,7 @@ class GrpcMaster:
             resp = s3.select_object_content(
                 Bucket=bucket, Key=key,
                 ExpressionType='SQL', Expression='SELECT count(*) FROM S3Object',
-                InputSerialization={'CSV': {'FileHeaderInfo': 'USE', 'AllowQuotedRecordDelimiter': True}},
+                InputSerialization={'CSV': {'FileHeaderInfo': 'USE', 'AllowQuotedRecordDelimiter': False}},
                 OutputSerialization={'CSV': {}}
             )
             for event in resp['Payload']:
