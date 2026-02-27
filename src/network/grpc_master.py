@@ -48,7 +48,7 @@ class GrpcMaster:
 
             try:
                 
-                # FASE 1: TENTATIVO DI RIAVVIO (REBOOT) DELLA MACCHINA ESISTENTE
+                # FASE 1: TENTATIVO DI RIAVVIO O ACCENSIONE DELLA MACCHINA ESISTENTE
                 # Cerchiamo l'ID dell'istanza partendo dal suo IP privato
                 response = ec2_client.describe_instances(
                     Filters=[{'Name': 'private-ip-address', 'Values': [old_ip]}]
@@ -56,14 +56,38 @@ class GrpcMaster:
                 
                 # Se l'istanza esiste ancora su AWS...
                 if response['Reservations'] and response['Reservations'][0]['Instances']:
-                    instance_id = response['Reservations'][0]['Instances'][0]['InstanceId']
-                    print(f" [AUTO-HEALING] Trovata istanza EC2 ({instance_id}) per l'IP {old_ip}. Tento il Riavvio Rapido (Reboot)...")
+                    instance = response['Reservations'][0]['Instances'][0]
+                    instance_id = instance['InstanceId']
+                    instance_state = instance['State']['Name']
                     
-                    # Riavvio fisico della macchina
-                    ec2_client.reboot_instances(InstanceIds=[instance_id])
+                    print(f" [AUTO-HEALING] Trovata istanza EC2 ({instance_id}) per l'IP {old_ip}. Stato attuale: {instance_state}")
                     
-                    # Il nuovo IP è uguale a quello vecchio!
-                    new_ip = old_ip
+                    if instance_state == 'stopped':
+                        print(f" [AUTO-HEALING] L'istanza è SPENTA. Tento l'Avvio (Start)...")
+                        ec2_client.start_instances(InstanceIds=[instance_id])
+                        
+                        # Dobbiamo aspettare che la macchina torni Running
+                        print(f" [AUTO-HEALING] Attesa boot EC2 {instance_id}...")
+                        waiter = ec2_client.get_waiter('instance_running')
+                        waiter.wait(InstanceIds=[instance_id])
+                        
+                    elif instance_state == 'running':
+                        print(f" [AUTO-HEALING] L'istanza è ACCESA ma bloccata. Tento il Riavvio (Reboot)...")
+                        ec2_client.reboot_instances(InstanceIds=[instance_id])
+                        # Il reboot è asincrono e la macchina rimane nello stato running, quindi non usiamo il waiter qui.
+                    
+                    else:
+                        # Stati come 'stopping', 'shutting-down', ecc.
+                        raise Exception(f"Stato dell'istanza non gestibile per il recupero: {instance_state}")
+                    
+                    # Ricarichiamo le info per ottenere il (nuovo o vecchio) indirizzo IP
+                    response = ec2_client.describe_instances(InstanceIds=[instance_id])
+                    new_ip = response['Reservations'][0]['Instances'][0].get('PrivateIpAddress')
+                    
+                    if not new_ip:
+                         raise Exception("Impossibile recuperare l'IP privato dopo il riavvio.")
+                         
+                    print(f" [AUTO-HEALING] Macchina ripristinata con IP: {new_ip}")
                 
             
                 # FASE 2: SE LA MACCHINA NON ESISTE PIU', NE CREO UNA NUOVA
