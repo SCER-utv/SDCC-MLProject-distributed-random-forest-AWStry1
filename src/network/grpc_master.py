@@ -69,9 +69,7 @@ class GrpcMaster:
             final_ip = None
 
             try:
-                # ==========================================================
                 # FASE 1: TENTATIVO DI RIAVVIO O ACCENSIONE DELLA MACCHINA ESISTENTE
-                # ==========================================================
                 response = ec2_client.describe_instances(Filters=[{'Name': 'private-ip-address', 'Values': [old_ip]}])
                 
                 if response['Reservations'] and response['Reservations'][0]['Instances']:
@@ -104,9 +102,7 @@ class GrpcMaster:
                 else:
                     print(f" [AUTO-HEALING] Istanza per IP {old_ip} non trovata (forse terminata). Passo al Piano B.")
 
-                # ==========================================================
                 # FASE 2: CREO NUOVA ISTANZA (Se il riavvio ha fallito o la macchina non esiste)
-                # ==========================================================
                 if not reboot_successful:
                     print(f" [AUTO-HEALING] Piano B: Creo una NUOVA istanza EC2 fiammante...")
                     
