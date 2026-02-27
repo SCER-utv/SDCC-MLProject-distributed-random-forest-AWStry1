@@ -39,66 +39,84 @@ class GrpcMaster:
 
             print(f"\n [AUTO-HEALING] Crash del nodo {old_worker_address}! Innesco ripristino unico (Lock acquisito)...")
             
-            # [MODIFICA]: Inizializziamo sia il client che la resource
             ec2_client = boto3.client('ec2', region_name='us-east-1')
             ec2_resource = boto3.resource('ec2', region_name='us-east-1')
             
             old_ip = old_worker_address.split(':')[0]
-            new_ip = None
+            
+            # --- CALCOLO DEL NOME LOGICO ---
+            try:
+                worker_num = self.workers.index(old_worker_address) + 1
+                new_name = f"DRF-worker{worker_num}-autohealed"
+            except ValueError:
+                new_name = "worker_extra_autohealed"
+
+            # --- SOTTO-FUNZIONE DI POLLING ---
+            # Questo ci permette di riusare il controllo porta sia per la Fase 1 che per la Fase 2
+            def _wait_for_port(target_ip, max_attempts=30):
+                print(f" [AUTO-HEALING] Attendo l'avvio di gRPC sull'IP {target_ip}...")
+                for attempt in range(max_attempts):
+                    try:
+                        with socket.create_connection((target_ip, 50051), timeout=2):
+                            print(f" [AUTO-HEALING] Porta 50051 APERTA al tentativo {attempt + 1}! Il Worker è pronto.")
+                            return True
+                    except (socket.timeout, ConnectionRefusedError, OSError):
+                        print(f" Tentativo {attempt + 1}/{max_attempts}: Porta ancora chiusa. Attendo...")
+                        time.sleep(5)
+                return False
+
+            reboot_successful = False
+            final_ip = None
 
             try:
-                
+                # ==========================================================
                 # FASE 1: TENTATIVO DI RIAVVIO O ACCENSIONE DELLA MACCHINA ESISTENTE
-                # Cerchiamo l'ID dell'istanza partendo dal suo IP privato
-                response = ec2_client.describe_instances(
-                    Filters=[{'Name': 'private-ip-address', 'Values': [old_ip]}]
-                )
+                # ==========================================================
+                response = ec2_client.describe_instances(Filters=[{'Name': 'private-ip-address', 'Values': [old_ip]}])
                 
-                # Se l'istanza esiste ancora su AWS...
                 if response['Reservations'] and response['Reservations'][0]['Instances']:
                     instance = response['Reservations'][0]['Instances'][0]
                     instance_id = instance['InstanceId']
                     instance_state = instance['State']['Name']
                     
-                    print(f" [AUTO-HEALING] Trovata istanza EC2 ({instance_id}) per l'IP {old_ip}. Stato attuale: {instance_state}")
+                    print(f" [AUTO-HEALING] Trovata istanza EC2 ({instance_id}) per l'IP {old_ip}. Stato: {instance_state}")
                     
-                    if instance_state == 'stopped':
-                        print(f" [AUTO-HEALING] L'istanza è SPENTA. Tento l'Avvio (Start)...")
-                        ec2_client.start_instances(InstanceIds=[instance_id])
+                    try:
+                        if instance_state == 'stopped':
+                            print(f" [AUTO-HEALING] L'istanza è SPENTA. Tento l'Avvio (Start)...")
+                            ec2_client.start_instances(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] Attesa boot EC2 {instance_id}...")
+                            ec2_client.get_waiter('instance_running').wait(InstanceIds=[instance_id])
+                            
+                        elif instance_state in ['running', 'pending']:
+                            print(f" [AUTO-HEALING] L'istanza è ACCESA ma bloccata. Tento il Riavvio (Reboot)...")
+                            ec2_client.reboot_instances(InstanceIds=[instance_id])
                         
-                        # Dobbiamo aspettare che la macchina torni Running
-                        print(f" [AUTO-HEALING] Attesa boot EC2 {instance_id}...")
-                        waiter = ec2_client.get_waiter('instance_running')
-                        waiter.wait(InstanceIds=[instance_id])
-                        
-                    elif instance_state == 'running':
-                        print(f" [AUTO-HEALING] L'istanza è ACCESA ma bloccata. Tento il Riavvio (Reboot)...")
-                        ec2_client.reboot_instances(InstanceIds=[instance_id])
-                        # Il reboot è asincrono e la macchina rimane nello stato running, quindi non usiamo il waiter qui.
-                    
-                    else:
-                        # Stati come 'stopping', 'shutting-down', ecc.
-                        raise Exception(f"Stato dell'istanza non gestibile per il recupero: {instance_state}")
-                    
-                    # Ricarichiamo le info per ottenere il (nuovo o vecchio) indirizzo IP
-                    response = ec2_client.describe_instances(InstanceIds=[instance_id])
-                    new_ip = response['Reservations'][0]['Instances'][0].get('PrivateIpAddress')
-                    
-                    if not new_ip:
-                         raise Exception("Impossibile recuperare l'IP privato dopo il riavvio.")
-                         
-                    print(f" [AUTO-HEALING] Macchina ripristinata con IP: {new_ip}")
-                
-            
-                # FASE 2: SE LA MACCHINA NON ESISTE PIU', NE CREO UNA NUOVA
+                        # FACCIAMO IL POLLING SULLA VECCHIA MACCHINA RIAVVIATA
+                        if _wait_for_port(old_ip):
+                            reboot_successful = True
+                            final_ip = old_ip
+                        else:
+                            print(f" [AUTO-HEALING] Il riavvio non ha funzionato (la porta non si apre). Passo al Piano B.")
+                            
+                    except Exception as e:
+                        print(f" [AUTO-HEALING] Errore API AWS durante il riavvio: {e}. Passo al Piano B.")
                 else:
-                    print(f" [AUTO-HEALING] Istanza per IP {old_ip} non trovata (forse terminata). Creo una NUOVA istanza EC2...")
+                    print(f" [AUTO-HEALING] Istanza per IP {old_ip} non trovata (forse terminata). Passo al Piano B.")
+
+                # ==========================================================
+                # FASE 2: CREO NUOVA ISTANZA (Se il riavvio ha fallito o la macchina non esiste)
+                # ==========================================================
+                if not reboot_successful:
+                    print(f" [AUTO-HEALING] Piano B: Creo una NUOVA istanza EC2 fiammante...")
                     
                     AMI_ID = 'ami-0f860c4d616d1b6ac'  
                     SUBNET_ID = 'subnet-0a61f2346de4cd937'
                     SG_ID = 'sg-004dedd411b0fe130'     
                     KEY_NAME = 'distributed-random-forest-key'
 
+                    # NOTA: Se passate 100% a Docker, questo script in futuro andrà aggiornato
+                    # per lanciare "docker run" invece di "python src/worker.py"
                     startup_script = """#!/bin/bash
                     sudo -u ubuntu bash -c '
                     cd /home/ubuntu/SDCC-MLProject-distributed-random-forest-AWStry
@@ -121,52 +139,33 @@ class GrpcMaster:
                     )
                     
                     new_instance = instances[0]
-                    
-                    new_instance.create_tags(
-                        Tags=[{'Key': 'Name', 'Value': new_name}]
-                    )
+                    new_instance.create_tags(Tags=[{'Key': 'Name', 'Value': new_name}])
 
                     print(f" [AUTO-HEALING] Creazione EC2 {new_instance.id} in corso. Attesa boot...")
                     new_instance.wait_until_running()
                     new_instance.reload()
                     new_ip = new_instance.private_ip_address
-                
-                
-                new_address = f"{new_ip}:50051"
+                    
+                    # FACCIAMO IL POLLING SULLA NUOVA MACCHINA
+                    if _wait_for_port(new_ip):
+                        final_ip = new_ip
+                    else:
+                        print(f" [AUTO-HEALING] ERRORE FATALE: Neanche la nuova istanza {new_ip} ha aperto la porta.")
+                        del self.is_recovering[old_worker_address]
+                        return None
 
-                # --- ACTIVE POLLING ---
-                port_is_open = False
-                max_attempts = 30 # Prova per circa 2.5 minuti (30 * 5 sec)
-                
-                print(f" [AUTO-HEALING] Macchina accesa ({new_ip}). Attendo l'avvio di gRPC...")
-
-                for attempt in range(max_attempts):
-                    try:
-                        with socket.create_connection((new_ip, 50051), timeout=2):
-                            port_is_open = True
-                            print(f" [AUTO-HEALING] Porta 50051 APERTA al tentativo {attempt + 1}! Il Worker è pronto.")
-                            break
-                    except (socket.timeout, ConnectionRefusedError, OSError):
-                        print(f" Tentativo {attempt + 1}/{max_attempts}: Porta ancora chiusa. Attendo...")
-                        time.sleep(5)
-                
-                if not port_is_open:
-                    print(f" [AUTO-HEALING] Timeout critico: Il worker {new_ip} non ha aperto la porta in tempo utile.")
-                    return None
-                
-                # Aspettiamo 10 secondi secchi per permettere agli import Python
-                # e al demone gRPC di stabilizzarsi prima di inviare i chunk.
-                print(" Attesa di stabilizzazione del demone gRPC (10s)...")
+                # ==========================================================
+                # CHIUSURA E RESTITUZIONE DEL NUOVO INDIRIZZO
+                # ==========================================================
+                print(" Attesa di stabilizzazione del demone gRPC (15s)...")
                 time.sleep(15)
 
-                # Salviamo il nuovo indirizzo IP nel dizionario. 
-                # Da questo momento in poi, gli altri 9 thread useranno questo IP senza chiamare AWS!
+                new_address = f"{final_ip}:50051"
                 self.is_recovering[old_worker_address] = new_address
                 return new_address
 
             except Exception as e:
-                print(f" [AUTO-HEALING] Fallimento critico di Boto3: {e}")
-                # Rimuoviamo il marcatore in caso di fallimento in modo che altri possano riprovare
+                print(f" [AUTO-HEALING] Fallimento critico generale di Boto3: {e}")
                 if old_worker_address in self.is_recovering:
                      del self.is_recovering[old_worker_address]
                 return None
