@@ -37,63 +37,77 @@ class GrpcMaster:
             # Segniamo subito che abbiamo preso in carico il ripristino
             self.is_recovering[old_worker_address] = None
 
-            # --- CALCOLO DEL NOME LOGICO ---
-            try:
-                worker_num = self.workers.index(old_worker_address) + 1
-                new_name = f"DRF-worker{worker_num}-autohealed"
-            except ValueError:
-                new_name = "worker_extra_autohealed"
-                worker_num = "?"
-            # ---------------------------------------
-            
             print(f"\n [AUTO-HEALING] Crash del nodo {old_worker_address}! Innesco ripristino unico (Lock acquisito)...")
-            ec2 = boto3.resource('ec2', region_name='us-east-1')
             
-            AMI_ID = 'ami-0f860c4d616d1b6ac'  
-            SUBNET_ID = 'subnet-0a61f2346de4cd937'
-            SG_ID = 'sg-004dedd411b0fe130'     
-            KEY_NAME = 'distributed-random-forest-key'
-
-            startup_script = """#!/bin/bash
-            sudo -u ubuntu bash -c '
-            cd /home/ubuntu/SDCC-MLProject-distributed-random-forest-AWStry
-            source venv/bin/activate
-            export PYTHONPATH=$(pwd)
-            export AWS_S3_BUCKET=distributed-random-forest-bkt
-            nohup python src/worker.py 50051 > /home/ubuntu/worker_log.txt 2>&1 &
-            '
-            """
+            # [MODIFICA]: Inizializziamo sia il client che la resource
+            ec2_client = boto3.client('ec2', region_name='us-east-1')
+            ec2_resource = boto3.resource('ec2', region_name='us-east-1')
+            
+            old_ip = old_worker_address.split(':')[0]
+            new_ip = None
 
             try:
-                instances = ec2.create_instances(
-                    ImageId=AMI_ID,
-                    InstanceType='t3.large',
-                    SubnetId=SUBNET_ID,
-                    SecurityGroupIds=[SG_ID], 
-                    KeyName=KEY_NAME,
-                    UserData=startup_script,
-                    MinCount=1, MaxCount=1,
-                    IamInstanceProfile={
-                        'Name': 'LabInstanceProfile' 
-                    }
+                
+                # FASE 1: TENTATIVO DI RIAVVIO (REBOOT) DELLA MACCHINA ESISTENTE
+                # Cerchiamo l'ID dell'istanza partendo dal suo IP privato
+                response = ec2_client.describe_instances(
+                    Filters=[{'Name': 'private-ip-address', 'Values': [old_ip]}]
                 )
                 
-                new_instance = instances[0]
+                # Se l'istanza esiste ancora su AWS...
+                if response['Reservations'] and response['Reservations'][0]['Instances']:
+                    instance_id = response['Reservations'][0]['Instances'][0]['InstanceId']
+                    print(f" [AUTO-HEALING] Trovata istanza EC2 ({instance_id}) per l'IP {old_ip}. Tento il Riavvio Rapido (Reboot)...")
+                    
+                    # Riavvio fisico della macchina
+                    ec2_client.reboot_instances(InstanceIds=[instance_id])
+                    
+                    # Il nuovo IP è uguale a quello vecchio!
+                    new_ip = old_ip
                 
-                # <- [MODIFICA]: Aggiunto qui la forzatura del Tag
-                new_instance.create_tags(
-                    Tags=[
-                        {
-                            'Key': 'Name',
-                            'Value': new_name
-                        }
-                    ]
-                )
+            
+                # FASE 2: SE LA MACCHINA NON ESISTE PIU', NE CREO UNA NUOVA
+                else:
+                    print(f" [AUTO-HEALING] Istanza per IP {old_ip} non trovata (forse terminata). Creo una NUOVA istanza EC2...")
+                    
+                    AMI_ID = 'ami-0f860c4d616d1b6ac'  
+                    SUBNET_ID = 'subnet-0a61f2346de4cd937'
+                    SG_ID = 'sg-004dedd411b0fe130'     
+                    KEY_NAME = 'distributed-random-forest-key'
 
-                print(f" [AUTO-HEALING] Creazione EC2 {new_instance.id} in corso. Attesa boot...")
-                new_instance.wait_until_running()
-                new_instance.reload()
-                new_ip = new_instance.private_ip_address
+                    startup_script = """#!/bin/bash
+                    sudo -u ubuntu bash -c '
+                    cd /home/ubuntu/SDCC-MLProject-distributed-random-forest-AWStry
+                    source venv/bin/activate
+                    export PYTHONPATH=$(pwd)
+                    export AWS_S3_BUCKET=distributed-random-forest-bkt
+                    nohup python src/worker.py 50051 > /home/ubuntu/worker_log.txt 2>&1 &
+                    '
+                    """
+
+                    instances = ec2_resource.create_instances(
+                        ImageId=AMI_ID,
+                        InstanceType='t3.large',
+                        SubnetId=SUBNET_ID,
+                        SecurityGroupIds=[SG_ID], 
+                        KeyName=KEY_NAME,
+                        UserData=startup_script,
+                        MinCount=1, MaxCount=1,
+                        IamInstanceProfile={'Name': 'LabInstanceProfile'}
+                    )
+                    
+                    new_instance = instances[0]
+                    
+                    new_instance.create_tags(
+                        Tags=[{'Key': 'Name', 'Value': new_name}]
+                    )
+
+                    print(f" [AUTO-HEALING] Creazione EC2 {new_instance.id} in corso. Attesa boot...")
+                    new_instance.wait_until_running()
+                    new_instance.reload()
+                    new_ip = new_instance.private_ip_address
+                
+                
                 new_address = f"{new_ip}:50051"
 
                 # --- ACTIVE POLLING ---
