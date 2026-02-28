@@ -6,8 +6,10 @@ from concurrent import futures
 import boto3
 import grpc
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from src.core.factories.ids_task_factory import IDSTaskFactory
 from src.core.factories.taxi_task_factory import TaxiTaskFactory
+from src.core.factories.airlines_task_factory import AirlinesTaskFactory
 
 from src.core.model import RandomForestManager
 from src.network.proto import rf_service_pb2_grpc, rf_service_pb2
@@ -25,7 +27,10 @@ class GrpcWorker(rf_service_pb2_grpc.RandomForestWorkerServicer):
 
     def _get_factory(self, task_type):
         """Risoluzione dinamica della Factory"""
-        return TaxiTaskFactory() if task_type == 1 else IDSTaskFactory()
+        if task_type == 1:
+            return TaxiTaskFactory()
+        else:
+            return AirlinesTaskFactory()
 
     def HealthCheck(self, request, context):
         return rf_service_pb2.HealthStatus(alive=True)
