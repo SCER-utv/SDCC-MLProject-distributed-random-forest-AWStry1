@@ -58,10 +58,8 @@ def prepare_zero_copy_dataset(name, is_regression):
             if is_regression:
                 train_chunk, test_chunk = train_test_split(chunk, test_size=0.20, random_state=42)
             else:
-            ## HARDCODED! DA MODIFICARE!
-                if dataset_name == 'taxi':
-                    target_col = 'vendor_id' # O la colonna che usate per Taxi
-                elif dataset_name == 'airlines':
+                ## HARDCODED! DA MODIFICARE!
+                if name == 'airlines':
                     target_col = 'TARGET_DELAY'
                 else:
                     target_col = 'Label' # Default per Higgs o altri
