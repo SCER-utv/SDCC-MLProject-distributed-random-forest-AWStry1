@@ -58,7 +58,15 @@ def prepare_zero_copy_dataset(name, is_regression):
             if is_regression:
                 train_chunk, test_chunk = train_test_split(chunk, test_size=0.20, random_state=42)
             else:
-                y_chunk_for_split = chunk['Label'].astype(int)
+            ## HARDCODED! DA MODIFICARE!
+                if dataset_name == 'taxi':
+                    target_col = 'vendor_id' # O la colonna che usate per Taxi
+                elif dataset_name == 'airlines':
+                    target_col = 'TARGET_DELAY'
+                else:
+                    target_col = 'Label' # Default per Higgs o altri
+                        
+                y_chunk_for_split = chunk[target_col].astype(int)
                 train_chunk, test_chunk = train_test_split(chunk, test_size=0.20, random_state=42, stratify=y_chunk_for_split)
 
             # Scriviamo sui file temporanei locali
