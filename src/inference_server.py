@@ -35,7 +35,13 @@ def download_and_load_model(model_id, dataset_type):
     bucket_name = os.getenv('AWS_S3_BUCKET', 'distributed-random-forest-bkt')
     
     # La cartella su S3 dipende dal dataset (taxi o higgs/ids)
-    s3_folder = "taxi" if dataset_type == "taxi" else "higgs"
+    # La cartella su S3 dipende dal dataset
+    if dataset_type == "taxi":
+        s3_folder = "taxi"
+    elif dataset_type == "airlines":
+        s3_folder = "airlines"
+    else:
+        s3_folder = "higgs"
     prefix = f"models/{s3_folder}/{model_id}"
     
     # Decidiamo la strategia in base al dataset
@@ -141,7 +147,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Avvia il Server di Inferenza REST")
     parser.add_argument('--model_id', type=str, required=True, help="Es: rf_higgs_20260224_120956")
-    parser.add_argument('--dataset', type=str, required=True, choices=['higgs', 'taxi', 'ids'], help="Il tipo di dataset per decidere la strategia")
+    parser.add_argument('--dataset', type=str, required=True, choices=['higgs', 'taxi', 'ids', 'airlines'], help="Il tipo di dataset per decidere la strategia")
     parser.add_argument('--port', type=int, default=8080, help="Porta per l'API (default 8080)")
     
     args = parser.parse_args()
