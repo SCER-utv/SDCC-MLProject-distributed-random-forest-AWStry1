@@ -93,7 +93,7 @@ def prepare_zero_copy_dataset(name, is_regression):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Data Prep: Split in Train/Test unici su S3")
-    parser.add_argument('--dataset', type=str, required=True, choices=['taxi', 'higgs', 'ids'])
+    parser.add_argument('--dataset', type=str, required=True, choices=['taxi', 'higgs', 'ids', 'airlines'])
     args = parser.parse_args()
 
     is_regression = True if args.dataset == 'taxi' else False
