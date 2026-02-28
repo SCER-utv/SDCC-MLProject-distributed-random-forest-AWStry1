@@ -59,7 +59,7 @@ def run_baseline(args):
     
     target_col = 'Label' if 'Label' in df_train.columns else df_train.columns[-1]
 
-    if args.dataset == 'higgs':
+    if args.dataset in ['higgs', 'airlines']:
         df_train[target_col] = df_train[target_col].astype(np.int8)
 
     X_train = df_train.drop(target_col, axis=1).values
@@ -69,7 +69,7 @@ def run_baseline(args):
     print(f"-> Caricamento Test Set da: {args.test_path}...")
     df_test = pd.read_csv(args.test_path, dtype=np.float32)
     
-    if args.dataset == 'higgs':
+    if args.dataset in ['higgs', 'airlines']:
         df_test[target_col] = df_test[target_col].astype(np.int8)
 
     X_test = df_test.drop(target_col, axis=1).values
@@ -121,7 +121,7 @@ def run_baseline(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Baseline Random Forest Single Machine")
-    parser.add_argument('--dataset', type=str, required=True, choices=['taxi', 'higgs'])
+    parser.add_argument('--dataset', type=str, required=True, choices=['taxi', 'higgs', 'airlines'])
     parser.add_argument('--train_path', type=str, required=True, help="Percorso S3 o locale del file di training")
     parser.add_argument('--test_path', type=str, required=True, help="Percorso S3 o locale del file di test")
     parser.add_argument('--trees', type=int, default=50, help="Numero di alberi della foresta")

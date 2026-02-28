@@ -17,7 +17,7 @@ WORKER_IPS = [
 
 PORT = "50051"
 TREES = 50
-DATASETS = ["higgs", "taxi"]
+DATASETS = ["airlines", "taxi"]
 
 def run_campaign():
     print("🚀 INIZIO CAMPAGNA DI TEST AUTOMATIZZATA 🚀")

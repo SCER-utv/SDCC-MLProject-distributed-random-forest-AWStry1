@@ -32,7 +32,7 @@ def send_training_request(dataset, workers, trees):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Client per inviare Job di Training via SQS")
-    parser.add_argument('--dataset', type=str, required=True, choices=['taxi', 'higgs'])
+    parser.add_argument('--dataset', type=str, required=True, choices=['taxi', 'higgs', 'airlines'])
     parser.add_argument('--workers', nargs='+', required=True, help="Lista IP:Porta dei worker")
     parser.add_argument('--trees', type=int, default=10, help="Numero totale di alberi")
     
