@@ -23,6 +23,7 @@ def prepare_zero_copy_dataset(name, is_regression):
         "higgs": f"s3://{S3_BUCKET}/data/interim/higgs_optimized.csv",
         "taxi":  f"s3://{S3_BUCKET}/data/interim/taxi_optimized.csv",
         "ids":   f"s3://{S3_BUCKET}/data/interim/ids_optimized.csv"
+        "airlines":   f"s3://{S3_BUCKET}/data/interim/airlines_optimized.csv"
     }
     
     input_s3_uri = sources[name]
