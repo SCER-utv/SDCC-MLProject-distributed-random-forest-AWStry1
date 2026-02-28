@@ -168,7 +168,7 @@ class RandomForestManager:
             # -------------------------
             
                     filename = f"{model_key}.joblib"
-                    dataset_folder = "taxi" if task_type == 1 else "higgs"
+                    dataset_folder = "taxi" if task_type == 1 else "airlines"
                     s3_key = f"models/{dataset_folder}/{model_id}/{filename}"
                     
                     # --- FIX PERMESSI: Usiamo self.models_dir invece di /tmp ---
@@ -210,3 +210,4 @@ class RandomForestManager:
         except Exception as e:
             print(f"!!! [ERRORE ESTRAZIONE VOTI]: {e}")
             return []
+
