@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.core.factories.ids_task_factory import IDSTaskFactory
 from src.core.factories.taxi_task_factory import TaxiTaskFactory
+from src.core.factories.airlines_task_factory import TaxiTaskFactory
 import threading
 
 class RandomForestManager:
@@ -210,4 +211,5 @@ class RandomForestManager:
         except Exception as e:
             print(f"!!! [ERRORE ESTRAZIONE VOTI]: {e}")
             return []
+
 
