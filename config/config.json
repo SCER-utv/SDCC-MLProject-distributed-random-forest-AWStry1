@@ -5,20 +5,21 @@
   
   "paths": {
     "ids": {
-      "train": "data/processed/ids/train.csv",
-      "test": "data/processed/ids/test.csv"
+      "train": "data/processed/ids/ids_train.csv",
+      "test": "data/processed/ids/ids_test.csv"
     },
     "taxi": {
-      "train": "data/processed/taxi/train.csv",
-      "test": "data/processed/taxi/test.csv"
+      "train": "data/processed/taxi/taxi_train.csv",
+      "test": "data/processed/taxi/taxi_test.csv"
     },
     "higgs": {
-      "train": "data/processed/higgs/train.csv",
-      "test": "data/processed/higgs/test.csv"
+      "train": "data/processed/higgs/higgs_train.csv",
+      "test": "data/processed/higgs/higgs_test.csv"
     },
     "airlines": {
-      "train": "data/processed/airlines/train.csv",
-      "test": "data/processed/airlines/test.csv"
+      "train": "data/processed/airlines/airlines_train.csv",
+      "test": "data/processed/airlines/airlines_test.csv"
     }
   }  
+
 }
