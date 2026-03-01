@@ -84,7 +84,7 @@ def update_model_registry(model_id, dataset, n_workers, n_trees, metrics_dict, c
 
 
 
-def process_training_job(dataset, workers_list, trees, strategy_file='config/worker_strategies.json'):
+def process_training_job(job_id, dataset, workers_list, trees, strategy_file='config/worker_strategies.json'):
     print(f"\n{'='*50}\n INIZIO ELABORAZIONE JOB: {dataset.upper()} | {trees} Alberi | {len(workers_list)} Workers\n{'='*50}")
 
     num_active_workers = len(workers_list)
@@ -92,7 +92,7 @@ def process_training_job(dataset, workers_list, trees, strategy_file='config/wor
     # [MODIFICA] BATCH SIZE DINAMICO (HARDCODED, DA MODIFICARE!)
     if dataset == 'taxi':
         BATCH_SIZE = 50000 
-    elif dataset == 'higgs':
+    elif dataset == 'airlines':
         BATCH_SIZE = 35000 
     else:
         BATCH_SIZE = 20000 
@@ -125,12 +125,15 @@ def process_training_job(dataset, workers_list, trees, strategy_file='config/wor
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     unique_model_id = f"rf_{dataset}_{timestamp}"
     config['model_id'] = unique_model_id
+    # --- 2. USIAMO IL JOB ID DEL CLIENT ---
+    config['model_id'] = job_id
     # ---------------------------------------------------------------------
 
     # Selezione Factory
     if dataset == 'taxi': factory = TaxiTaskFactory()
     elif dataset == 'higgs': factory = HiggsTaskFactory()
-    else: factory = IDSTaskFactory()
+    elif dataset == 'airlines': factory = AirlinesTaskFactory()
+    else: factory = TaskFactory()
 
     strategy = factory.create_strategy()
     data_manager = factory.create_data_manager(strategy)
@@ -152,6 +155,27 @@ def process_training_job(dataset, workers_list, trees, strategy_file='config/wor
     print(f"   - Sorgente Train: {train_s3_uri}")
     print(f"   - Sorgente Test:  {test_s3_uri}")
 
+    # --- 3. INIZIO LOGICA FAULT TOLERANCE MASTER (RESUME) ---
+    # Controlliamo se questo job era già stato addestrato prima di un crash
+    s3_client = boto3.client('s3')
+    dataset_folder = dataset # Es. "taxi", "higgs", "airlines"
+    prefix = f"models/{dataset_folder}/{job_id}/"
+    
+    training_already_done = False
+    
+    try:
+        response = s3_client.list_objects_v2(Bucket=target_bucket, Prefix=prefix)
+        if 'Contents' in response:
+            saved_models = [obj['Key'] for obj in response['Contents'] if obj['Key'].endswith('.joblib')]
+            # Se ci sono tanti file quanti i worker (o quasi, basta che ce ne sia almeno uno per fare inferenza)
+            if len(saved_models) > 0:
+                print(f"\n [RECOVERY] MIRACOLO! Trovati {len(saved_models)} modelli su S3 per {job_id}.")
+                print(" [RECOVERY] Il training era già stato completato prima del crash del Master.")
+                print(" [RECOVERY] Salto la fase di addestramento e passo direttamente all'Inferenza!\n")
+                training_already_done = True
+    except Exception as e:
+        print(f" [RECOVERY] Errore nel controllo S3: {e}")
+        
     # 2. Setup Master (Iniettiamo la strategia nel costruttore)
     grpc_master = GrpcMaster(config, strategy)
     grpc_master.connect()
@@ -165,7 +189,18 @@ def process_training_job(dataset, workers_list, trees, strategy_file='config/wor
     train_duration = time.time() - start_train
     print(f"Training completato in: {train_duration:.2f}s")
 
-    # 4. Inferenza (Testing)
+    # 5. Training Distribuito (SOLO SE NECESSARIO)
+    if not training_already_done:
+        print("\n--- Avvio Training Distribuito ---")
+        start_train = time.time()
+        grpc_master.train(train_s3_uri, train_s3_key, target_bucket)
+        train_duration = time.time() - start_train
+        print(f"Training completato in: {train_duration:.2f}s")
+    else:
+        # Valore fittizio perché abbiamo saltato il training
+        train_duration = 0.0
+        
+    # 6. Inferenza (Testing)
     # Otteniamo il nome del target dinamicamente dal data_manager specifico
     target_col = data_manager.get_target_column()
 
@@ -271,12 +306,16 @@ if __name__ == '__main__':
                 
                 # Leggiamo il "bigliettino" inviato dal Client
                 job_data = json.loads(message['Body'])
+                
+                # --- NUOVA RIGA: Peschiamo l'ID ---
+                job_id = job_data.get('job_id', f"rf_{job_data['dataset']}_{int(time.time())}") 
+                # (Il .get con fallback serve per retrocompatibilità se ci sono vecchi messaggi in coda)
                 dataset = job_data['dataset']
                 workers = job_data['workers']
                 trees = job_data['trees']
                 
                 # Chiamiamo il motore di training
-                process_training_job(dataset, workers, trees)
+                process_training_job(job_id, dataset, workers, trees)
                 
                 # Se il training è andato a buon fine, cancelliamo il messaggio dalla coda
                 sqs.delete_message(
