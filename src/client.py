@@ -2,15 +2,20 @@ import boto3
 import json
 import argparse
 import uuid
+import time
 
 # HARDCODED! DA MODIFICARE?
 QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/248593862537/JobRequestQueue.fifo"
 
 def send_training_request(dataset, workers, trees):
     sqs = boto3.client('sqs', region_name='us-east-1')
+
+    # 1. GENERIAMO L'ID UNIVOCO QUI SUL CLIENT
+    job_id = f"rf_{dataset}_{int(time.time())}"
     
     # Creiamo il "bigliettino" con le istruzioni per il Master
     messagge = {
+        "job_id": job_id,
         "dataset": dataset,
         "workers": workers,
         "trees": trees
@@ -26,6 +31,7 @@ def send_training_request(dataset, workers, trees):
         )
         print(f" Richiesta inviata con successo a SQS!")
         print(f" Message ID: {response['MessageId']}")
+        print(f" JOB ID: {job_id}") # STAMPIAMO L'ID PER CONFERMA
         print(f" Dettagli: Dataset={dataset}, Alberi={trees}, Workers={len(workers)}")
     except Exception as e:
         print(f" Errore nell'invio del messaggio: {e}")
@@ -38,3 +44,4 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     send_training_request(args.dataset, args.workers, args.trees)
+
