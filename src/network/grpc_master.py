@@ -113,7 +113,7 @@ class GrpcMaster:
                 # --- FASE 2: CREAZIONE NUOVA ISTANZA (Se Fase 1 fallisce) ---
                 if not reboot_successful:
                     print(f"\n [AUTO-HEALING] --- AVVIO PIANO B: CREAZIONE NUOVA ISTANZA ---")
-                    AMI_ID = 'ami-0f860c4d616d1b6ac'  
+                    AMI_ID = 'ami-087e66a9050052158'  
                     SUBNET_ID = 'subnet-0a61f2346de4cd937'
                     SG_ID = 'sg-004dedd411b0fe130'     
                     KEY_NAME = 'distributed-random-forest-key'
