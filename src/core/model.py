@@ -129,7 +129,7 @@ class RandomForestManager:
         joblib.dump(clf, local_path)
 
         s3_client = boto3.client('s3')
-        dataset_folder = "taxi" if task_type == 1 else "higgs"
+        dataset_folder = "taxi" if task_type == 1 else "airlines"
         
         # ORA CREIAMO LA SOTTOCARTELLA CON IL MODEL_ID!
         s3_key = f"models/{dataset_folder}/{model_id}/{filename}"
@@ -211,6 +211,7 @@ class RandomForestManager:
         except Exception as e:
             print(f"!!! [ERRORE ESTRAZIONE VOTI]: {e}")
             return []
+
 
 
 
