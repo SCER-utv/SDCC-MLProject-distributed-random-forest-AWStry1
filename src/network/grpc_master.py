@@ -24,12 +24,10 @@ class GrpcMaster:
        
 
     def _spawn_new_worker(self, old_worker_address):
-        # 1. Controllo se un altro thread ci sta già pensando
         if old_worker_address in self.is_recovering and self.is_recovering[old_worker_address] is not None:
              return self.is_recovering[old_worker_address]
 
         with self.recovery_lock:
-            # Doppio controllo
             if old_worker_address in self.is_recovering and self.is_recovering[old_worker_address] is not None:
                 return self.is_recovering[old_worker_address]
 
@@ -37,84 +35,126 @@ class GrpcMaster:
             print(f"\n{'='*50}\n [AUTO-HEALING] CRASH RILEVATO: {old_worker_address}\n{'='*50}")
             
             ec2_client = boto3.client('ec2', region_name='us-east-1')
+            ec2_resource = boto3.resource('ec2', region_name='us-east-1')
             old_ip = old_worker_address.split(':')[0]
             
             try:
-                # --- FASE 1: TROVARE L'ID DELLA MACCHINA MORTA ---
-                print(f" [AUTO-HEALING] Cerco l'istanza morta con IP {old_ip}...")
+                worker_num = self.workers.index(old_worker_address) + 1
+                new_name = f"DRF-worker{worker_num}-autohealed"
+            except ValueError:
+                new_name = "worker_extra_autohealed"
+
+            def _wait_for_port(target_ip, max_attempts=60): # 60 tentativi da 5s = 5 MINUTI DI ATTESA!
+                print(f" [AUTO-HEALING] Inizio polling: busso alla porta 50051 di {target_ip}...")
+                for attempt in range(max_attempts):
+                    try:
+                        with socket.create_connection((target_ip, 50051), timeout=2):
+                            print(f" [AUTO-HEALING] >>> MIRACOLO! Porta 50051 APERTA al tentativo {attempt + 1}! <<<")
+                            return True
+                    except (socket.timeout, ConnectionRefusedError, OSError):
+                        if attempt % 2 == 0: # Stampa solo ogni 10 secondi per non inondare il terminale
+                            print(f"   ... Tentativo {attempt + 1}/{max_attempts}: Porta chiusa. Attendo...")
+                        time.sleep(5)
+                return False
+
+            reboot_successful = False
+            final_ip = None
+
+            try:
+                # --- FASE 1: TENTATIVO DI RIAVVIO / ACCENSIONE ---
+                print(f" [AUTO-HEALING] Interrogo AWS per trovare l'IP {old_ip}...")
                 response = ec2_client.describe_instances(Filters=[{'Name': 'private-ip-address', 'Values': [old_ip]}])
                 
-                dead_instance_id = None
                 if response['Reservations'] and response['Reservations'][0]['Instances']:
-                    dead_instance_id = response['Reservations'][0]['Instances'][0]['InstanceId']
-                    print(f" [AUTO-HEALING] Trovata: {dead_instance_id}. Ne forzo la terminazione per innescare l'ASG...")
-                    # Terminando la macchina, l'ASG se ne accorge subito e ne crea una nuova
-                    ec2_client.terminate_instances(InstanceIds=[dead_instance_id])
+                    instance = response['Reservations'][0]['Instances'][0]
+                    instance_id = instance['InstanceId']
+                    instance_state = instance['State']['Name']
+                    
+                    print(f" [AUTO-HEALING] TROVATA SU AWS: Istanza {instance_id} | Stato: {instance_state.upper()}")
+                    
+                    try:
+                        if instance_state == 'stopped':
+                            print(f" [AUTO-HEALING] -> Inviato comando 'START_INSTANCES' ad AWS...")
+                            ec2_client.start_instances(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] -> Attendo che AWS accenda l'hardware...")
+                            ec2_client.get_waiter('instance_running').wait(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] -> Hardware ACCESO! Pausa di 30s per il boot di Linux...")
+                            time.sleep(30)
+                            
+                        elif instance_state in ['running', 'pending']:
+                            print(f" [AUTO-HEALING] -> Inviato comando 'REBOOT_INSTANCES' ad AWS...")
+                            ec2_client.reboot_instances(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] -> Pausa di 45s per far spegnere e riaccendere la macchina...")
+                            time.sleep(45)
+
+                        # --- NUOVO BLOCCO AGGIUNTO ---
+                        elif instance_state == 'stopping':
+                            print(f" [AUTO-HEALING] -> L'istanza si sta spegnendo. Attendo che sia completamente ferma...")
+                            ec2_client.get_waiter('instance_stopped').wait(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] -> Ora è 'stopped'. Inviato comando 'START_INSTANCES'...")
+                            ec2_client.start_instances(InstanceIds=[instance_id])
+                            ec2_client.get_waiter('instance_running').wait(InstanceIds=[instance_id])
+                            print(f" [AUTO-HEALING] -> Hardware ACCESO! Pausa di 30s per il boot...")
+                            time.sleep(30)
+                        # -----------------------------
+                        
+                        # Polling ESTREMO sulla vecchia macchina
+                        if _wait_for_port(old_ip, max_attempts=60):
+                            reboot_successful = True
+                            final_ip = old_ip
+                        else:
+                            print(f" [AUTO-HEALING] FALLIMENTO: Ho aspettato 5 minuti ma la porta su {old_ip} non si è mai aperta.")
+                            
+                    except Exception as e:
+                        print(f" [AUTO-HEALING] Errore Boto3 durante la Fase 1: {e}")
                 else:
-                    print(f" [AUTO-HEALING] Macchina {old_ip} non trovata (forse l'ASG l'ha già distrutta).")
+                    print(f" [AUTO-HEALING] Macchina non trovata su AWS.")
 
-                # --- FASE 2: ATTESA DEL NUOVO WORKER DALL'ASG ---
-                print(" [AUTO-HEALING] Aspetto che l'Auto Scaling Group crei una nuova macchina...")
-                # L'ASG creerà una nuova macchina. Come la troviamo? Ha lo stesso Tag, ma è più "giovane".
-                # Usiamo un ciclo di polling per cercare macchine "running" nel gruppo Worker-Node
-                
-                new_ip = None
-                for poll in range(24): # Polling per max 2 minuti (24 * 5s)
-                    time.sleep(5)
-                    # Cerchiamo le macchine del gruppo Worker (adatta i filtri se hai usato tag diversi nell'ASG)
-                    # Assumendo che tu abbia messo il Tag Name = Worker-Node nell'ASG
-                    filters = [
-                        {'Name': 'tag:Name', 'Values': ['Worker-Node']},
-                        {'Name': 'instance-state-name', 'Values': ['running']}
-                    ]
-                    running_workers_response = ec2_client.describe_instances(Filters=filters)
+                # --- FASE 2: CREAZIONE NUOVA ISTANZA (Se Fase 1 fallisce) ---
+                if not reboot_successful:
+                    print(f"\n [AUTO-HEALING] --- AVVIO PIANO B: CREAZIONE NUOVA ISTANZA ---")
+                    AMI_ID = 'ami-087e66a9050052158'  
+                    SUBNET_ID = 'subnet-0a61f2346de4cd937'
+                    SG_ID = 'sg-004dedd411b0fe130'     
+                    KEY_NAME = 'distributed-random-forest-key'
+
+                    startup_script = """#!/bin/bash
+                    sudo -u ubuntu bash -c '
+                    cd /home/ubuntu/SDCC-MLProject-distributed-random-forest-AWStry
+                    source venv/bin/activate
+                    export PYTHONPATH=$(pwd)
+                    export AWS_S3_BUCKET=distributed-random-forest-bkt
+                    nohup python src/worker.py 50051 > /home/ubuntu/worker_log.txt 2>&1 &
+                    '
+                    """
+
+                    instances = ec2_resource.create_instances(
+                        ImageId=AMI_ID, InstanceType='t3.large', SubnetId=SUBNET_ID,
+                        SecurityGroupIds=[SG_ID], KeyName=KEY_NAME, UserData=startup_script,
+                        MinCount=1, MaxCount=1, IamInstanceProfile={'Name': 'LabInstanceProfile'}
+                    )
                     
-                    running_ips = []
-                    for res in running_workers_response.get('Reservations', []):
-                        for inst in res.get('Instances', []):
-                            ip = inst.get('PrivateIpAddress')
-                            if ip: running_ips.append(ip)
+                    new_instance = instances[0]
+                    new_instance.create_tags(Tags=[{'Key': 'Name', 'Value': new_name}])
+
+                    print(f" [AUTO-HEALING] Creazione {new_instance.id} in corso. Attesa boot...")
+                    new_instance.wait_until_running()
+                    new_instance.reload()
+                    new_ip = new_instance.private_ip_address
                     
-                    # Troviamo l'IP nuovo: è quello "running" che NON è nella nostra lista originale di worker
-                    # e NON è l'old_ip che è appena morto
-                    original_ips = [w.split(':')[0] for w in self.workers]
-                    for ip in running_ips:
-                        if ip != old_ip and ip not in original_ips:
-                            new_ip = ip
-                            break # Trovato!
-                    
-                    if new_ip:
-                        print(f" [AUTO-HEALING] L'ASG ha partorito un nuovo Worker! IP: {new_ip}")
-                        break
+                    if _wait_for_port(new_ip, max_attempts=40):
+                        final_ip = new_ip
+                    else:
+                        print(f" [AUTO-HEALING] ERRORE FATALE: Neanche la nuova istanza {new_ip} risponde.")
+                        del self.is_recovering[old_worker_address]
+                        return None
 
-                if not new_ip:
-                    print(" [AUTO-HEALING] Fallimento: L'ASG non ha fornito un nuovo worker in tempo.")
-                    del self.is_recovering[old_worker_address]
-                    return None
+                print(" [AUTO-HEALING] Attesa di stabilizzazione del demone gRPC (15s)...")
+                time.sleep(15)
 
-                # --- FASE 3: POLLING SULLA PORTA DEL NUOVO WORKER ---
-                def _wait_for_port(target_ip, max_attempts=40):
-                    print(f" [AUTO-HEALING] Busso alla porta gRPC di {target_ip}...")
-                    for attempt in range(max_attempts):
-                        try:
-                            with socket.create_connection((target_ip, 50051), timeout=2):
-                                print(f" [AUTO-HEALING] >>> MIRACOLO! Porta 50051 APERTA! <<<")
-                                return True
-                        except (socket.timeout, ConnectionRefusedError, OSError):
-                            if attempt % 2 == 0: print(f"   ... Tentativo {attempt+1}/{max_attempts}...")
-                            time.sleep(5)
-                    return False
-
-                if _wait_for_port(new_ip):
-                    print(" [AUTO-HEALING] Attesa di stabilizzazione del demone gRPC (15s)...")
-                    time.sleep(15)
-                    new_address = f"{new_ip}:50051"
-                    self.is_recovering[old_worker_address] = new_address
-                    return new_address
-                else:
-                    print(f" [AUTO-HEALING] ERRORE FATALE: Il nuovo worker {new_ip} non risponde.")
-                    del self.is_recovering[old_worker_address]
-                    return None
+                new_address = f"{final_ip}:50051"
+                self.is_recovering[old_worker_address] = new_address
+                return new_address
 
             except Exception as e:
                 print(f" [AUTO-HEALING] Fallimento critico generale: {e}")
